@@ -39,8 +39,10 @@ import com.nimbusds.jose.JWSSigner;
 import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
-
 import java.nio.charset.StandardCharsets;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -49,7 +51,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
 @Tags({"security","token","provider","auth"})
 @CapabilityDescription("Executa o processo gerando um Token com expiração e propriedades adicionais. Permite propriedades extras para navegação de dados sensíveis")
@@ -62,12 +63,22 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
 
     public static final PropertyDescriptor TOKEN_EXPIRATION = new PropertyDescriptor
     .Builder().name("Token Expiration")
-    .displayName("Expiração do Token (ms)")
+    .displayName("Expiração do Token (segundos)")
     .description("Tempo de expiração do token em segundos após a emissão.")
     .required(true)
-    .defaultValue("600") 
     .addValidator(StandardValidators.LONG_VALIDATOR)
     .build();
+
+    public static final PropertyDescriptor CONFIG_TYPE_TOKEN = new PropertyDescriptor
+    .Builder()
+    .name("Token Configure Security")
+    .displayName("Secret Key")
+    .description("Chave utilizada para assinar o token JWT.")
+    .required(true)
+    .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+    .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+    .build();
+
 
     @Override
     public PropertyDescriptor getSupportedDynamicPropertyDescriptor(final String propertyName) {
@@ -99,6 +110,7 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
     @Override
     protected void init(final ProcessorInitializationContext context) {
         descriptors = new ArrayList<>();
+        descriptors.add(CONFIG_TYPE_TOKEN);
         descriptors.add(TOKEN_EXPIRATION);
         descriptors = Collections.unmodifiableList(descriptors);
 
@@ -123,7 +135,7 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
 
     }
 
-    @Override
+   @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) {
     FlowFile flowFile = session.get();
     if (flowFile == null) {
@@ -135,40 +147,43 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
             .evaluateAttributeExpressions(flowFile)
             .asLong();
 
+        ZonedDateTime nowBrasilia = ZonedDateTime.now(ZoneId.of("America/Sao_Paulo"));
+
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
+
         Date now = new Date();
         Date expiration = new Date(now.getTime() + (expirationSecs * 1000));
 
-        // Inicializa claims com padrão fixo
         JWTClaimsSet.Builder claimsBuilder = new JWTClaimsSet.Builder()
             .issuer("Token Agent")
             .issueTime(now)
             .expirationTime(expiration)
-            .claim(getIdentifier(), expiration); // opcional: nome do processor como claim
+            .claim(getIdentifier(), expiration);
 
         Map<String, String> atributosToken = new HashMap<>();
 
-        // Processa propriedades dinâmicas como claims e atributos
         for (Map.Entry<PropertyDescriptor, String> entry : context.getProperties().entrySet()) {
             PropertyDescriptor descriptor = entry.getKey();
 
             if (descriptor.isDynamic()) {
-                String propName = descriptor.getName(); // ex: email
+                String propName = descriptor.getName();
                 String value = context.getProperty(descriptor)
                     .evaluateAttributeExpressions(flowFile)
                     .getValue();
 
                 if (value != null) {
-                    claimsBuilder.claim(propName, value); // Claim no JWT (sem Token.)
-                    atributosToken.put("Token." + propName, value); // Atributo Token.email etc.
+                    claimsBuilder.claim(propName, value);
+                    atributosToken.put("Token." + propName, value);
                 }
             }
         }
 
-        // Constrói claims
         JWTClaimsSet claims = claimsBuilder.build();
 
-        // Gera e assina o token
-        String secret = UUID.randomUUID().toString() + UUID.randomUUID().toString();
+        String secret = context.getProperty(CONFIG_TYPE_TOKEN)
+                       .evaluateAttributeExpressions(flowFile)
+                       .getValue();
+
         byte[] sharedSecret = secret.getBytes(StandardCharsets.UTF_8);
         JWSSigner signer = new MACSigner(sharedSecret);
 
@@ -178,21 +193,18 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
 
         String token = signedJWT.serialize();
 
-        // Adiciona atributos padrão
         atributosToken.put("Token.id", token);
-        atributosToken.put("Token.data", now.toInstant().toString());
+        atributosToken.put("Token.data", nowBrasilia.format(formatter));
         atributosToken.put("Token.exp", expiration.toInstant().toString());
 
-        // Aplica atributos ao FlowFile
         flowFile = session.putAllAttributes(flowFile, atributosToken);
-
         session.transfer(flowFile, REL_SUCCESS);
 
     } catch (Exception e) {
         getLogger().error("Erro ao gerar token JWT", e);
         session.transfer(flowFile, REL_FAILURE);
     }
-} 
+}
 
    
 }
