@@ -50,7 +50,7 @@ import java.util.Map;
 import java.util.Set;
 
 
-@Tags({"sql","consulta","boolean"})
+@Tags({"sql","consult","boolean","viasoft"})
 @CapabilityDescription("Executa uma consulta SQL validando o retorno da query, retornando um atributo booleano e outro com o resultado")
 @SeeAlso({})
 @ReadsAttributes({@ReadsAttribute(attribute="", description="")})

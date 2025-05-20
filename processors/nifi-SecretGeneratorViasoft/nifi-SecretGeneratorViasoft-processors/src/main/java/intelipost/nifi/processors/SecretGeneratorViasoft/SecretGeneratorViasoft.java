@@ -34,8 +34,10 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
-
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -44,11 +46,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-@Tags({"viasoft", "jwt", "secret", "token"})
-@CapabilityDescription("Gera uma chave secreta única e persistente usada para assinar tokens JWT. Pode forçar a criação de uma nova chave, invalidando as anteriores.")
+@Tags({"security","token","provider","auth","viasoft","secret","jwt"})
+@CapabilityDescription("Gera uma chave secreta usada pelo cliente para validar segurança, ou cria chaves.pem para assinar tokens JWT. Pode forçar a criação de uma nova chave de cliente a cada execução, invalidando as anteriores. As chaves públicas e privadas devem ser do conhecimento apenas da aplicação.")
 @ReadsAttributes({@ReadsAttribute(attribute="", description="")})
 @WritesAttributes({@WritesAttribute(attribute="secret.key", description="A chave secreta gerada e persistida para assinatura de JWTs")})
 public class SecretGeneratorViasoft extends AbstractProcessor {
+
+    public static final PropertyDescriptor KEY_TYPE = new PropertyDescriptor
+    .Builder().name("key-type")
+    .displayName("Tipo de Chave")
+    .description("Define se o processador vai gerar/recuperar chave para CLIENTE (string aleatória) ou APLICAÇÃO (par RSA).")
+    .required(true)
+    .allowableValues("Cliente", "Aplicação")
+    .defaultValue("Cliente")
+    .build();
 
     public static final PropertyDescriptor FORCE_NEW_SECRET = new PropertyDescriptor
         .Builder().name("Forçar Nova Chave")
@@ -75,6 +86,7 @@ public class SecretGeneratorViasoft extends AbstractProcessor {
     @Override
     protected void init(final ProcessorInitializationContext context) {
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
+        descriptors.add(KEY_TYPE);
         descriptors.add(FORCE_NEW_SECRET);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
@@ -95,38 +107,77 @@ public class SecretGeneratorViasoft extends AbstractProcessor {
     }
 
     @Override
-    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        FlowFile flowFile = session.get();
-        if (flowFile == null) return;
+public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
+    FlowFile flowFile = session.get();
 
-        final ComponentLog logger = getLogger();
-        final StateManager stateManager = context.getStateManager();
-        final StateMap stateMap;
+    final ComponentLog logger = getLogger();
+    final StateManager stateManager = context.getStateManager();
 
-        try {
-            stateMap = stateManager.getState(Scope.LOCAL);
-            boolean forceNew = context.getProperty(FORCE_NEW_SECRET).getValue().equalsIgnoreCase("true");
-            String secretKey = stateMap.get("secret.key");
+    try {
+        StateMap stateMap = stateManager.getState(Scope.LOCAL);
 
-            if (secretKey == null || forceNew) {
-                secretKey = UUID.randomUUID().toString() + UUID.randomUUID().toString();
+        boolean forceNew = context.getProperty(FORCE_NEW_SECRET).asBoolean();
+        String keyType = context.getProperty(KEY_TYPE).getValue();
 
-                final Map<String, String> newState = new HashMap<>();
-                newState.put("secret.key", secretKey);
+        if ("Cliente".equalsIgnoreCase(keyType)) {
+            String clientKey = stateMap.get("client.key");
 
+            if (clientKey == null || forceNew) {
+                clientKey = UUID.randomUUID().toString() + UUID.randomUUID().toString();
+                Map<String, String> newState = new HashMap<>();
+                newState.put("client.key", clientKey);
                 stateManager.setState(newState, Scope.LOCAL);
-
-                logger.info("Nova chave secreta gerada.");
+                logger.info("Nova chave CLIENTE gerada e armazenada.");
             } else {
-                logger.info("Chave secreta existente recuperada do estado.");
+                logger.info("Chave CLIENTE recuperada do estado.");
             }
 
-            flowFile = session.putAttribute(flowFile, "secret.key", secretKey);
-            session.transfer(flowFile, REL_SUCCESS);
+            
+            flowFile = session.putAttribute(flowFile, "client.key", clientKey);
+    
 
-        } catch (Exception e) {
-            logger.error("Erro ao gerar ou recuperar chave secreta", e);
+        } else if ("APLICAÇÃO".equalsIgnoreCase(keyType)) {
+            String privateKeyPEM = stateMap.get("app.private.key");
+            String publicKeyPEM = stateMap.get("app.public.key");
+
+            if (privateKeyPEM == null || publicKeyPEM == null || forceNew) {
+                KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
+                keyGen.initialize(2048);
+                KeyPair keyPair = keyGen.generateKeyPair();
+
+                privateKeyPEM = pemFormat(keyPair.getPrivate().getEncoded(), "PRIVATE KEY");
+                publicKeyPEM = pemFormat(keyPair.getPublic().getEncoded(), "PUBLIC KEY");
+
+                Map<String, String> newState = new HashMap<>();
+                newState.put("app.private.key", privateKeyPEM);
+                newState.put("app.public.key", publicKeyPEM);
+                stateManager.setState(newState, Scope.LOCAL);
+
+                logger.info("Novas chaves RSA geradas e armazenadas.");
+            } else {
+                logger.info("Chaves RSA recuperadas do estado.");
+            }
+                flowFile = session.putAttribute(flowFile, "app.private.key", privateKeyPEM);
+                flowFile = session.putAttribute(flowFile, "app.public.key", publicKeyPEM);
+            
+
+        } else {
+            logger.error("Tipo de chave desconhecido: " + keyType);
             session.transfer(flowFile, REL_FAILURE);
+            return;
         }
+
+        session.transfer(flowFile, REL_SUCCESS);
+
+    } catch (Exception e) {
+        logger.error("Erro ao gerar ou recuperar chave", e);
+        session.transfer(flowFile, REL_FAILURE);
     }
+}
+
+private String pemFormat(byte[] keyBytes, String keyType) {
+    String base64Encoded = Base64.getMimeEncoder(64, "\n".getBytes()).encodeToString(keyBytes);
+    return "-----BEGIN " + keyType + "-----\n" + base64Encoded + "\n-----END " + keyType + "-----";
+}
+
 }

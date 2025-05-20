@@ -19,6 +19,7 @@ package intelipost.nifi.processors.TokenGeneratorViasoft;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
@@ -32,14 +33,19 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.JWSSigner;
-import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
-import java.nio.charset.StandardCharsets;
+import com.nimbusds.jose.crypto.RSASSASigner;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.Base64;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -52,7 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-@Tags({"security","token","provider","auth"})
+@Tags({"security","token","provider","auth","viasoft"})
 @CapabilityDescription("Executa o processo gerando um Token com expiração e propriedades adicionais. Permite propriedades extras para navegação de dados sensíveis")
 @SeeAlso({})
 @ReadsAttributes({
@@ -72,9 +78,10 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
     public static final PropertyDescriptor CONFIG_TYPE_TOKEN = new PropertyDescriptor
     .Builder()
     .name("Token Configure Security")
-    .displayName("Secret Key")
-    .description("Chave utilizada para assinar o token JWT.")
-    .required(true)
+    .displayName("Chave Privada")
+    .description("Chave privada RSA usada para assinar o token JWT no formato PEM ou Base64. Ex: -----BEGIN PRIVATE KEY----- ...")
+    .required(true) 
+    .sensitive(true)
     .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
     .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
     .build();
@@ -136,58 +143,75 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
     }
 
    @Override
-    public void onTrigger(final ProcessContext context, final ProcessSession session) {
+    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
     FlowFile flowFile = session.get();
     if (flowFile == null) {
         return;
     }
 
+    final ComponentLog logger = getLogger();
+
     try {
         long expirationSecs = context.getProperty(TOKEN_EXPIRATION)
-            .evaluateAttributeExpressions(flowFile)
-            .asLong();
+                .evaluateAttributeExpressions(flowFile)
+                .asLong();
 
         ZonedDateTime nowBrasilia = ZonedDateTime.now(ZoneId.of("America/Sao_Paulo"));
-
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
 
         Date now = new Date();
         Date expiration = new Date(now.getTime() + (expirationSecs * 1000));
 
         JWTClaimsSet.Builder claimsBuilder = new JWTClaimsSet.Builder()
-            .issuer("Token Agent")
-            .issueTime(now)
-            .expirationTime(expiration)
-            .claim(getIdentifier(), expiration);
+                .issuer("Token Agent")
+                .issueTime(now)
+                .expirationTime(expiration)
+                .claim(getIdentifier(), expiration);
 
         Map<String, String> atributosToken = new HashMap<>();
 
         for (Map.Entry<PropertyDescriptor, String> entry : context.getProperties().entrySet()) {
             PropertyDescriptor descriptor = entry.getKey();
-
             if (descriptor.isDynamic()) {
-                String propName = descriptor.getName();
+                String key = descriptor.getName();
                 String value = context.getProperty(descriptor)
-                    .evaluateAttributeExpressions(flowFile)
-                    .getValue();
+                        .evaluateAttributeExpressions(flowFile)
+                        .getValue();
 
                 if (value != null) {
-                    claimsBuilder.claim(propName, value);
-                    atributosToken.put("Token." + propName, value);
+                    claimsBuilder.claim(key, value);
+                    atributosToken.put("Token." + key, value);
                 }
             }
         }
 
         JWTClaimsSet claims = claimsBuilder.build();
 
-        String secret = context.getProperty(CONFIG_TYPE_TOKEN)
-                       .evaluateAttributeExpressions(flowFile)
-                       .getValue();
+        String privateKeyPEM = context.getProperty(CONFIG_TYPE_TOKEN)
+                .evaluateAttributeExpressions(flowFile)
+                .getValue();
 
-        byte[] sharedSecret = secret.getBytes(StandardCharsets.UTF_8);
-        JWSSigner signer = new MACSigner(sharedSecret);
+        String pemClean = privateKeyPEM
+        .replace("-----BEGIN PRIVATE KEY-----", "")
+        .replace("-----END PRIVATE KEY-----", "")
+        .replaceAll("\\s+", ""); 
 
-        JWSHeader header = new JWSHeader(JWSAlgorithm.HS256);
+        byte[] keyBytes = Base64.getDecoder().decode(pemClean);
+        PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(keyBytes);
+        KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+        PrivateKey privateKey = keyFactory.generatePrivate(keySpec);
+
+        if (privateKey instanceof RSAPrivateKey) {
+            RSAPrivateKey rsaPrivateKey = (RSAPrivateKey) privateKey;
+            int keyLength = rsaPrivateKey.getModulus().bitLength();
+            if (keyLength < 2048) {
+                throw new ProcessException("Chave RSA muito pequena, precisa ter pelo menos 2048 bits");
+            }
+        }
+
+        JWSSigner signer = new RSASSASigner(privateKey);
+
+        JWSHeader header = new JWSHeader(JWSAlgorithm.RS256);
         SignedJWT signedJWT = new SignedJWT(header, claims);
         signedJWT.sign(signer);
 
@@ -201,7 +225,8 @@ public class TokenGeneratorViasoft extends AbstractProcessor {
         session.transfer(flowFile, REL_SUCCESS);
 
     } catch (Exception e) {
-        getLogger().error("Erro ao gerar token JWT", e);
+        logger.error("Erro ao gerar token JWT", e);
+        flowFile = session.putAttribute(flowFile, "token.error", e.getMessage());
         session.transfer(flowFile, REL_FAILURE);
     }
 }

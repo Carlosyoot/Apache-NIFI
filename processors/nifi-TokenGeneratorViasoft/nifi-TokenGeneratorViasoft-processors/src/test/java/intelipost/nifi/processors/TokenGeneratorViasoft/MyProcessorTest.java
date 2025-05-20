@@ -28,6 +28,7 @@ public class MyProcessorTest {
     @BeforeEach
     public void init() {
         testRunner = TestRunners.newTestRunner(TokenGeneratorViasoft.class);
+        
     }
 
     @Test
