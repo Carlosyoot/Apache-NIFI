@@ -16,18 +16,15 @@
  */
 package intelipost.nifi.processors.SqlProcessor;
 
-import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 public class MyProcessorTest {
 
-    private TestRunner testRunner;
-
     @BeforeEach
     public void init() {
-        testRunner = TestRunners.newTestRunner(SqlProcessor.class);
+        TestRunners.newTestRunner(SqlProcessor.class);
     }
 
     @Test

@@ -12,16 +12,22 @@
     <version>1.0</version>
     <packaging>nar</packaging>
     <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
         <maven.javadoc.skip>true</maven.javadoc.skip>
         <source.skip>true</source.skip>
     </properties>
 
     <dependencies>
+        <!-- código do processador -->
         <dependency>
             <groupId>intelipost.nifi</groupId>
             <artifactId>nifi-SqlProcessor-processors</artifactId>
             <version>1.0</version>
         </dependency>
+
+        <!-- DBCP: última versão publicada do plugin NAR -->
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-dbcp-service-nar</artifactId>
@@ -30,5 +36,4 @@
             <scope>compile</scope>
         </dependency>
     </dependencies>
-
 </project>
